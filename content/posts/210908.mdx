@@ -1,0 +1,178 @@
+---
+title: window resize with jotai
+date: 2021-09-08
+author: jehoon.park
+---
+
+## 시작
+
+이번에 리액트 프로젝트 개선 과제를 진행하다가 window resize 관련 처리를 해야할 일이 생겨서 [jotai](https://jotai.pmnd.rs/)와 함께 사용해보면 어떨까 생각이 되서 시도해보았다.
+
+## 원래 사용하던 방법
+
+window의 resize 이벤트를 활용하여 width/height를 관리 하는 방법중에 일반적이라 생각되는 패턴이 [오픈소스](https://usehooks.com/useWindowSize/)로 있어서 이걸 기준으로 작성했다.
+
+```tsx
+import { useState, useEffect } from "react";
+// Usage
+function App() {
+  const size = useWindowSize();
+  return (
+    <div>
+      {size.width}px / {size.height}px
+    </div>
+  );
+}
+// Hook
+function useWindowSize() {
+  // Initialize state with undefined width/height so server and client renders match
+  // Learn more here: https://joshwcomeau.com/react/the-perils-of-rehydration/
+  const [windowSize, setWindowSize] = useState({
+    width: undefined,
+    height: undefined,
+  });
+  useEffect(() => {
+    // Handler to call on window resize
+    function handleResize() {
+      // Set window width/height to state
+      setWindowSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    }
+    // Add event listener
+    window.addEventListener("resize", handleResize);
+    // Call handler right away so state gets updated with initial window size
+    handleResize();
+    // Remove event listener on cleanup
+    return () => window.removeEventListener("resize", handleResize);
+  }, []); // Empty array ensures that effect is only run on mount
+  return windowSize;
+}
+```
+
+resize 이벤트를 state로 관리하여 리턴값으로 size를 내보내는데 필요한곳 마다 호출하면 resize 이벤트를 계속 등록한다.
+이 hook을 한번만 사용하려면 받은 `windowSize`를 props로 계속 내려주거나 상태관리를 해야하는데 그럴거면 아예 atomic하게 상태관리를 쓸까 생각이 들었었다.
+처음부터 `jotai`를 고려했던건 아닌데 개선과제의 다른 부분에서 `jotai`를 사용하게 될거같아서 그럼 써보지 뭐!
+
+## 구현해보기
+
+먼저 사용할 atom을 만들어준다.
+```tsx
+type WindowSize = {
+  windowWidth: number | undefined;
+  windowHeight: number | undefined;
+};
+
+const windowSizeAtom = atom<WindowSize>({
+  windowWidth: undefined,
+  windowHeight: undefined,
+});
+```
+
+내부의 상태관리는 state 대신 `useAtom`으로 대체한다.
+
+```tsx
+function useWindowSize(): void {
+  const [windowSize, setWindowSize] = useAtom(windowSizeAtom);
+
+  useEffect(() => {
+    function handleResize() {
+      setWindowSize({
+        windowWidth: window.innerWidth,
+        windowHeight: window.innerHeight,
+      });
+    }
+
+    window.addEventListener('resize', handleResize);
+
+    handleResize();
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [setWindowSize]);
+
+  return windowSize;
+}
+```
+
+이제 resize event를 필요한 곳 페이지 최상단에 선언한다.
+
+```tsx
+function Page() {
+  // 값을 활용할 필요가 없어서 일단 값은 안받아썼는데
+  // const [windowSize] = useWindowSize(); 처럼 선언해도 상관없음
+  useWindowSize();
+  // ...
+  return <Component />;
+}
+
+function Component() {
+  // windowWidth만 보는 경우
+  const [windowSize] = useAtom(windowSizeAtom);
+  useEffect(() => {
+    // 쿵짝쿵짝
+  }, [windowSize]);
+  // ...
+}  
+```
+
+끝이다. 뭔가 아쉽다.
+
+## 뭔가 더 없나
+
+이번에 진행한 곳에서는 실제로 구현한 곳에서는 windowSize 전체를 받을 필요가 없이 width만 혹은 height만 필요한 경우가 좀 더 많았다.
+array, object 형태로 관리 하면 아래와 같이 atom에서 atom을 꺼내야한다.
+```tsx
+const windowSizeAtom = atom({
+  windowWidth: atom(undefined),
+  windowHeight: atom(undefined),
+});
+
+// 이러면 이렇게 두번 컴포넌트에서 직접 꺼내야되서..
+const windowSize = useAtom(windowSizeAtom);
+const windowWidth = useAtom(windowSize.windowWidth);
+```
+
+어짜피 전역 값이고 atom을 미리 생성하고 관리하고싶어서 `focusAtom`을 활용하여 세분화를 시도해보았다.
+다만 `optics-ts`라는 라이브러리를 추가로 설치해야한다.
+
+```tsx
+const windowSizeAtom = atom<WindowSize>({
+  windowWidth: undefined,
+  windowHeight: undefined,
+});
+
+// 
+export const windowWidthAtom = focusAtom(windowSizeAtom, (optic) =>
+  optic.prop('windowWidth'),
+);
+
+export const windowHeightAtom = focusAtom(windowSizeAtom, (optic) =>
+  optic.prop('windowHeight'),
+);
+```
+
+이후에 필요한 곳에서 꺼내서 사용하면 된다.
+
+```tsx
+function Component() {
+  // windowWidth만 보는 경우
+  const [windowWidth] = useAtom(windowWidthAtom);
+  useEffect(() => {
+    // 쿵짝쿵짝
+  }, [windowWidth]);
+
+  // resize 자체를 알아야할 경우
+  const [windowSize] = useAtom(windowSizeAtom);
+  useEffect(() => {
+    const { windowWidth, windowHeight } = windowSize;
+    // 쿵짝쿵짝
+  }, [windowSize]);
+}  
+```
+
+잘된다. 뭔가 `optics-ts`를 설치안하고 방법이 없을까? 고민중인데 혹시 뭔가 다른 방법으로 생각나면 다시 적어보려한다.
+뭔가 이런거 적어도 되나 적으면서도 고민하다가 안적는거보단 낫겠지 해서 작성해보았다.
+
+끝.
